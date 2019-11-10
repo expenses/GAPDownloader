@@ -27,6 +27,8 @@ python3 tile_fetch.py --zoom 4 "https://artsandculture.google.com/asset/the-wate
 You can of course change the zoom level and the URL.
 If you omit the zoom level, the script will display the list of available levels.
 
+Run with the '-h' flag for a list of available commands.
+
 ## Technical details
 
 This project required reverse-engineering google's code to find 
