@@ -101,7 +101,7 @@ async def fetch_tile(session, image_info, tiles_dir, x, y, z):
     return x, y, encrypted_bytes
 
 
-async def load_tiles(info, z=-1, outfile=None):
+async def load_tiles(info, z=-1, outfile=None, q=95):
     if z >= len(info.tile_info):
         print(
             'Invalid zoom level {z}. '
@@ -109,7 +109,7 @@ async def load_tiles(info, z=-1, outfile=None):
                 z=z,
                 max=len(info.tile_info) - 1)
         )
-        z = len(info.tile_info) - 1
+        z = len(info.tile_info) - 1 
 
     z %= len(info.tile_info)  # keep 0 <= z < len(tile_info)
     level = info.tile_info[z]
@@ -136,7 +136,7 @@ async def load_tiles(info, z=-1, outfile=None):
 
     print("Downloaded all tiles. Saving...")
     final_image_filename = outfile or (info.image_name + '.jpg')
-    img.save(final_image_filename)
+    img.save(final_image_filename, quality=q, subsampling=0)
     shutil.rmtree(tiles_dir)
     print("Saved the result as " + final_image_filename)
 
@@ -168,7 +168,13 @@ def main():
             except (ValueError, AssertionError):
                 print("Not a valid zoom level.")
 
-    coro = load_tiles(image_info, zoom, args.outfile)
+    try:
+        comp_quality = int(input("What image quality would you like? (0-95, higher is better): "))
+        assert 0 <= comp_quality <= 95
+    except (ValueError, AssertionError):
+        print("Not a valid quality of compression. Please select a number from 0-95")
+
+    coro = load_tiles(image_info, zoom, args.outfile, comp_quality)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(coro)
 
