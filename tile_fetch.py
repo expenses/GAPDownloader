@@ -125,6 +125,23 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
         )
         z = len(info.tile_info) - 1
 
+    ## Ensuring image resolution fits in JPEG - two pass 
+    if info.tile_info[z].size[0] > 65535 or info.tile_info[z].size[1] > 65535:
+        print(
+            'Zoom level {r} too high for JPEG output, using next zoom level {next_z} instead'.format(
+                r=z,
+                next_z=z-1)
+        )
+        z = z-1
+        
+    if info.tile_info[z].size[0] > 65535 or info.tile_info[z].size[1] > 65535:
+        print(
+            'Zoom level {r} *still* too high for JPEG output, using next zoom level {next_z} instead'.format(
+                r=z,
+                next_z=z-1)
+        )
+        z = z-1
+
     z %= len(info.tile_info)  # keep 0 <= z < len(tile_info)
     level = info.tile_info[z]
 
