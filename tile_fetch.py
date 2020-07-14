@@ -8,6 +8,7 @@ import itertools
 import re
 import shutil
 import string
+import unidecode
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import aiohttp
 from PIL import Image
 from lxml import etree
+from pyexiv2 import Image as TaggedImage
 
 import async_tile_fetcher
 from decryption import decrypt
@@ -42,6 +44,14 @@ class ImageInfo(object):
     def __init__(self, url):
         page_source = urllib.request.urlopen(url).read()
 
+        self.metadata = {'Xmp.xmp.URL': url}
+        for item in html.fromstring(page_source).cssselect('[id^="metadata"] li'):
+            text = item.text_content()
+            # XMP metadata needs to be under the Xmp.xml section
+            # removes and non-word character from the title as they invalid for metadata tag names
+            key = 'Xmp.xmp.' + re.sub(r'\W', '', text[:text.find(':')])
+            self.metadata[key] = text[text.find(':') + 1:].strip()
+
         match = self.RE_URL_PATH_TOKEN.search(page_source)
         if match is None:
             raise ValueError("Unable to find google arts image token")
@@ -51,7 +61,8 @@ class ImageInfo(object):
         self.token = token or b''
         url_path = urllib.parse.unquote_plus(urllib.parse.urlparse(url).path)
         self.image_slug, image_id = url_path.split('/')[-2:]
-        self.image_name = '%s - %s' % (string.capwords(self.image_slug.replace("-"," ")), image_id)
+        self.image_name = unidecode.unidecode(string.capwords(self.image_slug.replace("-"," ")))
+        self.image_id = image_id
 
         meta_info_url = "https:{}=g".format(url_no_proto.decode('utf8'))
         meta_info_tree = etree.fromstring(urllib.request.urlopen(meta_info_url).read())
@@ -137,9 +148,31 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
         tile_img = Image.open(io.BytesIO(clear_bytes))
         img.paste(tile_img, (x * info.tile_width, y * info.tile_height))
 
-    print("Downloaded all tiles. Saving...")
-    final_image_filename = outfile or (info.image_name + '.jpg')
-    img.save(final_image_filename, quality=quality, subsampling=0)
+  ## Try to extract author name ("Creator"/"Painter") and date ("Date Created"/"Date") from metadata
+    author = "0"
+    date = ""
+    for key, value in info.metadata.items():
+        if key.lower() == "xmp.xmp.creator" or key.lower() == "xmp.xmp.painter":
+            # Avoiding non-ASCII characters in the painter/creator name
+            author = unidecode.unidecode(value)
+        elif key.lower() == "xmp.xmp.date" or key.lower() == "xmp.xmp.datecreated":
+            # Avoiding "/" in the date (year), especially when multiple dates are given
+            date = value.replace('/','-')
+            
+    # Taking out the author's name from the image name - authors name is appended later
+    modified_image_name = info.image_name[0:len(info.image_name)-len(author)-1]
+    
+    final_image_filename = (author + ' - ' + date + ' - ' + modified_image_name + ' - ' +info.image_id + '.jpg')
+    img.save(final_image_filename, quality=quality, subsampling=0, optimize=True)
+    xmp_file_obj = TaggedImage(final_image_filename)
+
+    # writes key:value one at a time, which is heavier on writes,
+    # but far more robust.
+    for key, value in info.metadata.items():
+        try:
+            xmp_file_obj.modify_xmp({key: value})
+        except RuntimeError:
+            print(f'Failed to add add XMP tag with key "{key}" with value "{value}"')
     shutil.rmtree(tiles_dir)
     print("Saved the result as " + final_image_filename)
 
