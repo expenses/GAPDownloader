@@ -15,7 +15,7 @@ from pathlib import Path
 
 import aiohttp
 from PIL import Image
-from lxml import etree
+from lxml import etree, html
 from pyexiv2 import Image as TaggedImage
 
 import async_tile_fetcher
@@ -165,6 +165,8 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
         tile_img = Image.open(io.BytesIO(clear_bytes))
         img.paste(tile_img, (x * info.tile_width, y * info.tile_height))
 
+    print("Downloaded all tiles. Saving...")
+    
   ## Try to extract author name ("Creator"/"Painter") and date ("Date Created"/"Date") from metadata
     author = "0"
     date = ""
@@ -192,8 +194,7 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
             print(f'Failed to add add XMP tag with key "{key}" with value "{value}"')
     shutil.rmtree(tiles_dir)
     print("Saved the result as " + final_image_filename)
-
-
+    
 def main():
     import argparse
 
