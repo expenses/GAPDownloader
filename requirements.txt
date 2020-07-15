@@ -4,3 +4,4 @@ Pillow~=7.1.2
 aiohttp~=3.6.2
 pyexiv2~=2.2.0
 pandas
+unidecode
