@@ -135,8 +135,7 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
     PNG_Output = 0
     if info.tile_info[z].size[0] > 65535 or info.tile_info[z].size[1] > 65535:
         PNG_Output = 1
-    print(level.size)
-    print(z)
+
     img = Image.new(mode="RGB", size=level.size)
 
     tiles_dir = Path(info.image_name)
@@ -186,7 +185,10 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
         else:
             final_image_filename = (author + ' - ' + date + ' - ' + modified_image_name + ' - ' +info.image_id + '.jpg')
         ## Optimize = True for JPEG breaks ("Suspension not allowed here" error) if quality is 95 and the file is large enough - from what I can test anyway.
-        img.save(final_image_filename, quality=quality, subsampling=0, optimize=True if quality < 95) 
+        if quality < 95:
+            img.save(final_image_filename, quality=quality, subsampling=0, optimize=True) 
+        else:
+            img.save(final_image_filename, quality=quality, subsampling=0) 
     
     xmp_file_obj = TaggedImage(final_image_filename) 
     if PNG_Output == 0:
