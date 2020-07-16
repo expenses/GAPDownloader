@@ -8,13 +8,19 @@ import itertools
 import re
 import shutil
 import string
+import unidecode
 import urllib.parse
 import urllib.request
+import pandas as pd
+from random import randint
+from time import sleep
+
 from pathlib import Path
 
 import aiohttp
 from PIL import Image
-from lxml import etree
+from lxml import etree, html
+from pyexiv2 import Image as TaggedImage
 
 import async_tile_fetcher
 from decryption import decrypt
@@ -42,6 +48,14 @@ class ImageInfo(object):
     def __init__(self, url):
         page_source = urllib.request.urlopen(url).read()
 
+        self.metadata = {'Xmp.xmp.URL': url}
+        for item in html.fromstring(page_source).cssselect('[id^="metadata"] li'):
+            text = item.text_content()
+            # XMP metadata needs to be under the Xmp.xml section
+            # removes and non-word character from the title as they invalid for metadata tag names
+            key = 'Xmp.xmp.' + re.sub(r'\W', '', text[:text.find(':')])
+            self.metadata[key] = text[text.find(':') + 1:].strip()
+
         match = self.RE_URL_PATH_TOKEN.search(page_source)
         if match is None:
             raise ValueError("Unable to find google arts image token")
@@ -51,7 +65,8 @@ class ImageInfo(object):
         self.token = token or b''
         url_path = urllib.parse.unquote_plus(urllib.parse.urlparse(url).path)
         self.image_slug, image_id = url_path.split('/')[-2:]
-        self.image_name = '%s - %s' % (string.capwords(self.image_slug.replace("-"," ")), image_id)
+        self.image_name = unidecode.unidecode(string.capwords(self.image_slug.replace("-"," ")))
+        self.image_id = image_id
 
         meta_info_url = "https:{}=g".format(url_no_proto.decode('utf8'))
         meta_info_tree = etree.fromstring(urllib.request.urlopen(meta_info_url).read())
@@ -117,6 +132,10 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
     z %= len(info.tile_info)  # keep 0 <= z < len(tile_info)
     level = info.tile_info[z]
 
+    PNG_Output = 0
+    if info.tile_info[z].size[0] > 65535 or info.tile_info[z].size[1] > 65535:
+        PNG_Output = 1
+
     img = Image.new(mode="RGB", size=level.size)
 
     tiles_dir = Path(info.image_name)
@@ -138,11 +157,56 @@ async def load_tiles(info, z=-1, outfile=None, quality=90):
         img.paste(tile_img, (x * info.tile_width, y * info.tile_height))
 
     print("Downloaded all tiles. Saving...")
-    final_image_filename = outfile or (info.image_name + '.jpg')
-    img.save(final_image_filename, quality=quality, subsampling=0)
+    
+    ## Try to extract author name ("Creator"/"Painter") and date ("Date Created"/"Date") from metadata
+    author = "0"
+    date = ""
+    for key, value in info.metadata.items():
+        if key.lower() == "xmp.xmp.creator" or key.lower() == "xmp.xmp.painter":
+            # Avoiding non-ASCII characters in the painter/creator name
+            author = unidecode.unidecode(value)
+        elif key.lower() == "xmp.xmp.date" or key.lower() == "xmp.xmp.datecreated":
+            # Avoiding "/" in the date (year), especially when multiple dates are given
+            date = value.replace('/','-')
+            
+    # Taking out the author's name from the image name - authors name is appended later
+    modified_image_name = info.image_name[0:len(info.image_name)-len(author)-1]
+
+    if PNG_Output == 1:
+        if author == 0:
+            final_image_filename = (info.image_name + '.png')
+        else: 
+            final_image_filename = (author + ' - ' + date + ' - ' + modified_image_name + ' - ' +info.image_id + '.png')
+        ## Optimize=True for PNG attempts the highest level of lossless compression possible.
+        img.save(final_image_filename, optimize=True)    
+    else:
+        if author == 0:
+            final_image_filename = (info.image_name + '.jpg')
+        else:
+            final_image_filename = (author + ' - ' + date + ' - ' + modified_image_name + ' - ' +info.image_id + '.jpg')
+        ## Optimize = True for JPEG breaks ("Suspension not allowed here" error) if quality is 95 and the file is large enough - from what I can test anyway.
+        if quality < 95:
+            img.save(final_image_filename, quality=quality, subsampling=0, optimize=True) 
+        else:
+            img.save(final_image_filename, quality=quality, subsampling=0) 
+    
+    xmp_file_obj = TaggedImage(final_image_filename) 
+    if PNG_Output == 0:
+        try:
+            xmp_file_obj.modify_xmp(info.metadata)
+        except:
+            print("Cannot write all metadata at once; writing tag by tag...")
+            # writes key:value one at a time, which is heavier on writes,
+            # but far more robust.
+            for key, value in info.metadata.items():
+                try:
+                    xmp_file_obj.modify_xmp({key: value})
+                except RuntimeError:
+                    print(f'Failed to add add XMP tag with key "{key}" with value "{value}"')
+                    print(repr(e))
     shutil.rmtree(tiles_dir)
     print("Saved the result as " + final_image_filename)
-
+    
 
 def main():
     import argparse
@@ -154,29 +218,126 @@ def main():
     parser.add_argument('--outfile', type=str, nargs='?',
                         help='The name of the file to create.')
     parser.add_argument('--quality', type=int, nargs='?', default=90,
-                        help='Compression level from 0-95. Higher is better.')
+                        help='Compression level from 0-95. Higher is better quality, larger file size.')
+    parser.add_argument('-a','--add_url', type=str, nargs='?', help='Add a new URL to the queue.',
+                        action='store', dest='add_url')
+    parser.add_argument('-b', '--batch-add', type=str, nargs=1, help="Adds a list of URL's to the queue from a csv file.", action="store", dest='csv')
+    parser.add_argument('-d', '--download', help="Downloads all remaining links in the queue.",action="store_true", default=None)
     args = parser.parse_args()
 
     assert 0 <= args.quality <= 95, "Image quality must be between 0 and 95"
-    url = args.url or input("Enter the url of the image: ")
 
-    print("Downloading image meta-information...")
-    image_info = ImageInfo(url)
+    if args.csv or args.add_url or args.download:
+        df = None
+        try:
+            df = pd.read_csv("dlcache", index_col=0)
+        except:
+            print("No cache found. Setting up a new one.")
+            df = pd.DataFrame(columns=['url', 'quality', 'downloaded'])
+    
+    if args.csv:
+        url_df = pd.read_csv(args.csv[0])
+        for u in url_df['url']:
+            print("######### Processing '{}'".format(u))
+            img_id = u[-(len(u)-u.rfind("/")-1):]
+            
+            if not (img_id in df.index):
+                assert 0 <= args.quality <= 95, "Image quality must be between 0 and 95"
+                df.loc[img_id] = {'url':u, 'quality':args.quality, "downloaded":False}
+                print("######### Added to queue.")
+            else:
+                print("Image already in list. Ignoring the URL.")   
 
-    zoom = args.zoom
-    if zoom is None:
-        print(image_info)
-        while True:
+    if args.add_url:
+        print("######### Processing '{}'".format(args.add_url))
+        u = args.add_url
+        img_id = u[-(len(u)-u.rfind("/")-1):]
+        if not (img_id in df.index):
+            df.loc[img_id] = {'url':args.add_url, 'quality':args.quality, "downloaded":False}
+            print("######### Added to queue.")
+        else:
+            print("Image already in list. Ignoring the URL.")
+            
+    if args.download:  
+        print("######### Starting download")
+        for row in df.loc[df['downloaded'] == False].iterrows(): 
+            print(row[1]['url'])          
+            img_info = None        
+            
             try:
-                zoom = int(input("Which level do you want to download? "))
-                assert 0 <= zoom < len(image_info.tile_info)
-                break
-            except (ValueError, AssertionError):
-                print("Not a valid zoom level.")
+                img_info = ImageInfo(row[1]['url'])
+            except:
+                print("Invalid url.")
+                valid_url = False
+                
+            #if args.quality is None: - maybe add handling for overwriting quality in batch file?
+                assert 0 <= ImageInfo(row[1]['quality']) <= 95, "Image quality must be between 0 and 95"
+            
+            if img_info:
+                 if args.zoom:
+                     zoom = args.zoom
+                     try:
+                         assert 0 <= zoom < len(img_info.tile_info)
+                     except:
+                         print('No valid zoom level.')
+                 else:
+                     zoom = len(img_info.tile_info)-1
+                     print("Defaulting to highest zoom level ({}).".format(zoom))
+                 
+                 ## Ensuring image resolution fits in JPEG
+                 while img_info.tile_info[zoom].size[0] > 65535 or img_info.tile_info[zoom].size[1] > 65535:
+                     print(
+                        'Zoom level {r} too high for JPEG output, using next zoom level {next_zoom} instead'.format(
+                            r=zoom,
+                            next_zoom=zoom-1)
+                     )
+                     zoom = zoom-1               
+                 print("Using zoom level {}.".format(zoom))
+            
+            coro = load_tiles(img_info, zoom, img_info.image_name, row[1]['quality'])
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(coro)
+            print(img_info.image_id)
+            try:
+                df.at[img_info.image_id, 'downloaded'] = True
+            except:
+                print("Archive recording not successful")
+            print("Download successful. Sleeping before next download...")
+            sleep(randint(30,40))
+        print("######### Finished download")
+        df.to_csv('dlcache')
+    
+    if args.csv is None and args.add_url is None and args.download is None:
+        url = args.url or input("Enter the url of the image: ")    
+        
+        print("Downloading image meta-information...")
+        image_info = ImageInfo(url)
+        
+        zoom = args.zoom
+        if zoom is None:
+            print(image_info)
+            while True:
+                try:
+                    zoom = int(input("Which level do you want to download? Choose 11 to default to largest JPEG-compliant level: "))
+                    if zoom == 11:
+                        ## Ensuring image resolution fits in JPEG. Otherwise, image will be saved as PNG, which does not have max resolution limits (but does not allow for metadata embedding).
+                        zoom = len(img_info.tile_info)-1
+                        while image_info.tile_info[zoom].size[0] > 65535 or image_info.tile_info[zoom].size[1] > 65535:
+                            print(
+                               'Zoom level {r} too high for JPEG output, using next zoom level {next_zoom} instead'.format(
+                                   r=zoom,
+                                   next_zoom=zoom-1)
+                            )
+                            zoom = zoom-1
+                    else:
+                        assert 0 <= zoom < len(image_info.tile_info)
+                        break    
+                except (ValueError, AssertionError):
+                    print("Not a valid zoom level.")
 
-    coro = load_tiles(image_info, zoom, args.outfile, args.quality)
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(coro)
+        coro = load_tiles(image_info, zoom, args.outfile, args.quality)
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(coro)
 
 
 if __name__ == '__main__':
