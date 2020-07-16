@@ -285,7 +285,7 @@ def main():
                      print("Defaulting to highest zoom level ({}).".format(zoom))
                  
                  ## Ensuring image resolution fits in JPEG
-                 if img_info.tile_info[zoom].size[0] > 65535 or img_info.tile_info[zoom].size[1] > 65535:
+                 while img_info.tile_info[zoom].size[0] > 65535 or img_info.tile_info[zoom].size[1] > 65535:
                      print(
                         'Zoom level {r} too high for JPEG output, using next zoom level {next_zoom} instead'.format(
                             r=zoom,
